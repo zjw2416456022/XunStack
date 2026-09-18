@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-初次 CI 可以解析依赖生成真实锁文件以便审核；不是伪造锁文件。锁文件核验并提交后使用固定锁构建。该阶段 CI 只测试检测核心，分别在 Linux x86_64、macOS ARM64 和 macOS Intel 原生运行，不生成应用发行包。
+初次 CI 可以解析依赖生成真实锁文件以便审核；不是伪造锁文件。锁文件核验并提交后使用固定锁构建。该阶段 CI 只测试检测核心，分别在 Linux x86_64、Linux ARM64、macOS ARM64 和 macOS Intel 原生运行，不生成应用发行包。Linux ARM64 使用 `ubuntu-24.04-arm`，启动时验证 `uname -m` 为 `aarch64`，不是交叉编译或模拟运行；Ubuntu ARM64 检查不等于麒麟、统信等目标信创系统的实机验收。
 
 ## 后续接入与安全边界
 
