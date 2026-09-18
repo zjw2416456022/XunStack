@@ -23,6 +23,9 @@ jobs:
           - name: Linux x86_64
             os: ubuntu-24.04
             arch: x86_64
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            arch: aarch64
           - name: macOS Apple Silicon
             os: macos-15
             arch: arm64
