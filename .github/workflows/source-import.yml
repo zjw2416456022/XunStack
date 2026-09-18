@@ -1,0 +1,108 @@
+name: One-time source import and lock bootstrap
+
+on:
+  push:
+    branches: [dev/source-alpha-ci]
+    paths: [.bootstrap/ready.json]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xunstack-source-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: github.repository == 'zjw2416456022/XunStack' && github.ref == 'refs/heads/dev/source-alpha-ci'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify and unpack the reviewed source snapshot
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, io, json, lzma, pathlib, shutil, tarfile
+          root = pathlib.Path.cwd()
+          marker = json.loads((root / '.bootstrap/ready.json').read_text())
+          expected = '0015d74e92ab4dae55f3394c17ebdba58320654b95a592417e1b0fbc86aab4f7'
+          if marker != {'sha256': expected, 'parts': 15, 'files': 59}:
+              raise SystemExit('Unexpected import marker; refusing to import')
+          if (root / 'Cargo.toml').exists():
+              raise SystemExit('Source already exists; refusing to overwrite a working repository')
+          encoded = ''.join((root / f'.bootstrap/source.{i:03}.b64').read_text().strip() for i in range(15))
+          data = base64.b64decode(encoded, validate=True)
+          if hashlib.sha256(data).hexdigest() != expected:
+              raise SystemExit('Source transport checksum mismatch')
+          unpacked = lzma.decompress(data, memlimit=256 * 1024 * 1024)
+          if len(unpacked) > 2 * 1024 * 1024:
+              raise SystemExit('Source archive exceeds expected size')
+          with tarfile.open(fileobj=io.BytesIO(unpacked)) as archive:
+              members = archive.getmembers()
+              if len(members) != 59 or len({m.name for m in members}) != 59:
+                  raise SystemExit('Unexpected or duplicate source members')
+              for item in members:
+                  path = pathlib.PurePosixPath(item.name)
+                  if not item.isfile() or path.is_absolute() or '..' in path.parts or path.parts[0] in ('.git', '.github', '.bootstrap'):
+                      raise SystemExit('Unsafe source member')
+                  if path.suffix == '.md' and str(path) not in ('README.md', 'AGENTS.md'):
+                      raise SystemExit('Unexpected extra handwritten documentation')
+                  destination = root / path
+                  if destination.exists() and str(path) != 'README.md':
+                      raise SystemExit('Refusing to overwrite existing source')
+              for item in members:
+                  destination = root / item.name
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_bytes(archive.extractfile(item).read())
+                  destination.chmod(item.mode & 0o777)
+          prototype = root / 'design/preview.html'
+          if hashlib.sha256(prototype.read_bytes()).hexdigest() != '97f374a34c41b3329349eb2406ccd70735ec1c76b4487259378dcbc320788818':
+              raise SystemExit('Prototype identity check failed')
+          shutil.rmtree(root / '.bootstrap')
+          print('Imported 59 reviewed source files; original prototype bytes preserved. This is not a product test.')
+          PY
+      - name: Commit actual source and remove temporary transport files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          git commit -m 'feat: import XunStack alpha source with two-document maintenance'
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/dev/source-alpha-ci
+          echo "Source commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Install repository-pinned Rust toolchain
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$version" --profile minimal --component rustfmt --component clippy
+      - name: Resolve authentic dependency locks and format Rust
+        run: |
+          cargo generate-lockfile
+          npm --prefix web install --package-lock-only --ignore-scripts
+          cargo fmt --all
+      - name: Commit generated lockfiles and formatting only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git add Cargo.lock web/package-lock.json crates
+          git diff --cached --quiet && exit 0
+          git commit -m 'build: lock resolved dependencies and format Rust sources'
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/dev/source-alpha-ci
+          echo "Locked source commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Dependency resolution is not compilation or product acceptance. Open a PR to run the separate read-only CI matrix.' >> "$GITHUB_STEP_SUMMARY"
