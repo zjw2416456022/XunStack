@@ -1,0 +1,94 @@
+name: Detection core only - native checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-24.04
+            arch: x86_64
+          - name: macOS Apple Silicon
+            os: macos-15
+            arch: arm64
+          - name: macOS Intel
+            os: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify native architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          printf 'Testing commit %s on %s\n' "$(git rev-parse HEAD)" "$(uname -a)"
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^channel = "\([0-9.]*\)"$/\1/p' rust-toolchain.toml)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$version" --profile minimal --component rustfmt --component clippy
+          rustc --version --verbose
+      - name: Resolve initial dependency lock when not yet committed
+        run: |
+          set -euo pipefail
+          if [ ! -f Cargo.lock ]; then
+            echo '::warning::Initial core import has no reviewed lockfile yet. This run resolves one for verification, not for a reproducible release.'
+            cargo generate-lockfile
+          fi
+          echo '::group::Resolved dependency lock - nonsecret build metadata'
+          cat Cargo.lock
+          echo '::endgroup::'
+      - name: Compile the actual detection core
+        run: cargo check --workspace --all-targets --locked
+      - name: Run Clippy without suppressing warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run actual Rust unit tests
+        run: cargo test --workspace --locked -- --nocapture
+      - name: Capture formatting changes for subsequent reviewed commit
+        if: always()
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          echo '::group::Rustfmt diff - this collection is not a formatting gate'
+          git diff -- crates
+          echo '::endgroup::'
+      - name: Record scope, not application acceptance
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          MATRIX_NAME: ${{ matrix.name }}
+        run: |
+          {
+            echo '## Detection core checks only'
+            printf 'Platform: %s\n\n' "$MATRIX_NAME"
+            printf 'Job status: %s\n\n' "$JOB_STATUS"
+            printf 'Source commit: %s\n\n' "$(git rev-parse HEAD)"
+            echo 'This workflow tests the imported Rust library only.'
+            echo 'No HTTP service, browser UI, real filesystem recycle/purge, production vulnerability database, installer or deployable application is tested or produced.'
+            echo 'A successful core job MUST NOT be reported as full macOS or security acceptance.'
+          } >> "$GITHUB_STEP_SUMMARY"
